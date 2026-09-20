@@ -9,12 +9,13 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QObject, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon
 from PyQt6.QtWidgets import (
-    QApplication, QDialog, QHBoxLayout, QListWidgetItem, QVBoxLayout, QWidget,
+    QApplication, QDialog, QHBoxLayout, QListWidgetItem, QSystemTrayIcon,
+    QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
-    BodyLabel, CardWidget, FluentIcon, FluentWindow, InfoBar, ListWidget,
-    MessageBoxBase, PushButton, SearchLineEdit, SubtitleLabel, SwitchButton,
-    TextEdit, TitleLabel, setTheme, Theme,
+    Action, BodyLabel, CardWidget, FluentIcon, FluentWindow, InfoBar,
+    ListWidget, MessageBoxBase, PushButton, SearchLineEdit, SubtitleLabel,
+    SwitchButton, SystemTrayMenu, TextEdit, TitleLabel, setTheme, Theme,
 )
 
 from .avatars import AvatarCache
@@ -563,6 +564,7 @@ class MainWindow(FluentWindow):
         self.monitor = monitor
         self.avatars = AvatarCache()
         self._in_champ_select = False
+        self._really_quit = False
         self._bridge = MonitorBridge()
 
         self.champ_page = ChampSelectPage(monitor, avatars=self.avatars, parent=self)
@@ -571,6 +573,7 @@ class MainWindow(FluentWindow):
         self._init_window()
         self._init_navigation()
         self._init_preferences()
+        self._init_tray()
         self._connect_monitor_events()
 
     def _init_window(self):
@@ -579,6 +582,44 @@ class MainWindow(FluentWindow):
         icon_path = Path(__file__).parent / "assets" / "app.ico"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
+
+    def _init_tray(self):
+        """System tray icon; closing the window hides to the tray."""
+        self.tray_menu = SystemTrayMenu(parent=self)
+        self.tray_menu.addAction(
+            Action(FluentIcon.VIEW, "显示主界面", triggered=self._show_from_tray)
+        )
+        self.tray_menu.addSeparator()
+        self.tray_menu.addAction(
+            Action(FluentIcon.POWER_BUTTON, "退出", triggered=self._quit_from_tray)
+        )
+
+        self.tray_icon = QSystemTrayIcon(self.windowIcon(), self)
+        self.tray_icon.setContextMenu(self.tray_menu)
+        self.tray_icon.setToolTip(APP_TITLE)
+        self.tray_icon.activated.connect(self._on_tray_activated)
+        self.tray_icon.show()
+
+    def _show_from_tray(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_from_tray(self):
+        self._really_quit = True
+        self.monitor.stop()
+        self.tray_icon.hide()
+        QApplication.instance().quit()
+
+    def _on_tray_activated(self, reason):
+        if reason in (
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+            QSystemTrayIcon.ActivationReason.Trigger,
+        ):
+            if self.isVisible() and not self.isMinimized():
+                self.hide()
+            else:
+                self._show_from_tray()
 
     def _init_navigation(self):
         self.addSubInterface(
@@ -592,9 +633,18 @@ class MainWindow(FluentWindow):
         """Load persisted preferences and apply them to monitor and UI."""
         self.config = AppConfig()
         self.config.load()
+        self._apply_persisted_settings()
 
+        card = self.champ_page.preference_card
+        card.auto_swap_switch.checkedChanged.connect(self._toggle_auto_swap)
+        card.edit_button.clicked.connect(self._edit_preferences)
+        self._start_avatar_prefetch()
+
+    def _apply_persisted_settings(self):
+        """Push the persisted config into monitor state and UI switches."""
         self.monitor.set_auto_swap(self.config.auto_swap_enabled)
         self.monitor.set_preferences(self.config.preferred_champions)
+        self.monitor.set_auto_accept(self.config.auto_accept_enabled)
 
         card = self.champ_page.preference_card
         card.set_preferences(self.config.preferred_champions)
@@ -602,9 +652,10 @@ class MainWindow(FluentWindow):
         card.auto_swap_switch.setChecked(self.config.auto_swap_enabled)
         card.auto_swap_switch.blockSignals(False)
 
-        card.auto_swap_switch.checkedChanged.connect(self._toggle_auto_swap)
-        card.edit_button.clicked.connect(self._edit_preferences)
-        self._start_avatar_prefetch()
+        accept_switch = self.champ_page.auto_accept_switch
+        accept_switch.blockSignals(True)
+        accept_switch.setChecked(self.config.auto_accept_enabled)
+        accept_switch.blockSignals(False)
 
     def _background_init(self):
         """One-time startup init: load names without blocking the UI.
@@ -693,6 +744,8 @@ class MainWindow(FluentWindow):
 
     def _toggle_auto_accept(self, enabled):
         self.monitor.set_auto_accept(enabled)
+        self.config.auto_accept_enabled = enabled
+        self.config.save()
         self.log_page.append("已开启自动接受" if enabled else "已关闭自动接受")
 
     def _update_connection_status(self, connected):
@@ -729,6 +782,17 @@ class MainWindow(FluentWindow):
         label.setStyleSheet(f"color: {color};")
 
     def closeEvent(self, event):
+        if not self._really_quit:
+            # Hide to tray instead of quitting; exit via the tray menu.
+            event.ignore()
+            self.hide()
+            self.tray_icon.showMessage(
+                APP_TITLE,
+                "已最小化到托盘，双击图标恢复，右键菜单可退出",
+                QSystemTrayIcon.MessageIcon.Information,
+                3000,
+            )
+            return
         self.monitor.stop()
         super().closeEvent(event)
 

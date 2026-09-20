@@ -6,6 +6,7 @@ from pathlib import Path
 
 DEFAULT_PREFERRED_CHAMPIONS = []
 DEFAULT_AUTO_SWAP_ENABLED = False
+DEFAULT_AUTO_ACCEPT_ENABLED = False
 
 
 def default_config_path():
@@ -22,6 +23,7 @@ class AppConfig:
         self.path = path or default_config_path()
         self.preferred_champions = list(DEFAULT_PREFERRED_CHAMPIONS)
         self.auto_swap_enabled = DEFAULT_AUTO_SWAP_ENABLED
+        self.auto_accept_enabled = DEFAULT_AUTO_ACCEPT_ENABLED
 
     def load(self):
         """Load config from disk; keep defaults on missing/corrupt file."""
@@ -40,6 +42,10 @@ class AppConfig:
         if isinstance(auto_swap, bool):
             self.auto_swap_enabled = auto_swap
 
+        auto_accept = data.get("auto_accept_enabled")
+        if isinstance(auto_accept, bool):
+            self.auto_accept_enabled = auto_accept
+
         return True
 
     def save(self):
@@ -47,6 +53,7 @@ class AppConfig:
         data = {
             "preferred_champions": self.preferred_champions,
             "auto_swap_enabled": self.auto_swap_enabled,
+            "auto_accept_enabled": self.auto_accept_enabled,
         }
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
