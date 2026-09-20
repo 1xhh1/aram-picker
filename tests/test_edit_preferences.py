@@ -72,3 +72,24 @@ def test_ensure_name_map_false_when_nothing_available(qapp, tmp_path, monkeypatc
 
     assert window._ensure_name_map() is False
     assert mapper.name_map == {}
+
+
+def test_background_init_loads_names_and_triggers_prefetch(qapp, tmp_path, monkeypatch):
+    # At startup (no client) the background init must fill the name map
+    # once and hand the alias pairs to the avatar prefetch.
+    cache = tmp_path / "champion_names.json"
+    cache.write_text(
+        json.dumps({"names": {"157": "疾风剑豪"}, "aliases": {"157": "Yasuo"}}),
+        encoding="utf-8",
+    )
+    mapper = ChampionNameMapper(cache_file=cache)
+    assert mapper.name_map == {}
+    window = make_window(mapper)
+
+    recorded = {}
+    monkeypatch.setattr(window.avatars, "download_async", lambda pairs: recorded.update({"pairs": list(pairs)}))
+
+    window._background_init()
+
+    assert mapper.name_map == {157: "疾风剑豪"}
+    assert recorded["pairs"] == [(157, "Yasuo")]

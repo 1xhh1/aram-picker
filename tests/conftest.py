@@ -13,3 +13,13 @@ def qapp():
     C++ references and crashes later modules with RuntimeError.
     """
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ensure_qapplication(qapp):
+    """Create the shared QApplication even for tests that do not ask for it.
+
+    Modules like avatars construct QIcon, which hard-crashes the
+    interpreter without a QGuiApplication instance.
+    """
+    yield qapp

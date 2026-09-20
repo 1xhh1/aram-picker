@@ -2,10 +2,11 @@
 
 import html
 import sys
+import threading
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QObject, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QHBoxLayout, QListWidgetItem, QVBoxLayout, QWidget,
@@ -110,6 +111,7 @@ class ChampionPickerDialog(MessageBoxBase):
         self.search_box.textChanged.connect(self._filter)
 
         self.list_widget = ListWidget(self)
+        self.list_widget.setIconSize(QSize(32, 32))
         selected = set(selected_names)
         self._name_to_id = {name: champion_id for champion_id, name in name_map.items()}
         self._resolved_ids = set()
@@ -134,7 +136,7 @@ class ChampionPickerDialog(MessageBoxBase):
         if avatars is not None and self._resolved_ids != set(name_map):
             self._icon_timer = QTimer(self)
             self._icon_timer.timeout.connect(self._refresh_icons)
-            self._icon_timer.start(800)
+            self._icon_timer.start(300)
 
         self.viewLayout.addWidget(self.titleLabel)
         self.viewLayout.addWidget(self.search_box)
@@ -240,6 +242,7 @@ class ChampSelectPage(QWidget):
 
         list_title = SubtitleLabel("替补席英雄（点击换人）", self)
         self.bench_list = ListWidget(self)
+        self.bench_list.setIconSize(QSize(32, 32))
         self.bench_list.itemClicked.connect(self._on_item_clicked)
 
         layout.addLayout(title_row)
@@ -476,6 +479,17 @@ class MainWindow(FluentWindow):
         card.edit_button.clicked.connect(self._edit_preferences)
         self._start_avatar_prefetch()
 
+    def _background_init(self):
+        """One-time startup init: load names without blocking the UI.
+
+        Loads the champion map from cache/Data Dragon when the game client
+        is closed, then kicks the avatar prefetch in the background.
+        """
+        mapper = self.monitor.name_mapper
+        if not mapper.name_map:
+            mapper.load()
+        self._start_avatar_prefetch()
+
     def _start_avatar_prefetch(self):
         """Download missing avatars in the background once names are known."""
         pairs = list(self.monitor.name_mapper.alias_map.items())
@@ -603,6 +617,8 @@ def run():
     window = MainWindow(lcu, monitor)
     window.show()
 
+    # Warm up names and avatars in the background (no client needed).
+    threading.Thread(target=window._background_init, daemon=True).start()
     monitor.start()
     try:
         sys.exit(app.exec())

@@ -119,3 +119,37 @@ def test_download_aborts_without_version(cache, monkeypatch):
 
     cache._download([(1, "Ahri")])
     assert not any(cache.directory.glob("*.png")) if cache.directory.exists() else True
+
+
+def test_downloads_run_concurrently(cache, monkeypatch):
+    # A sequential downloader needs N * latency; with a worker pool the
+    # wall time must stay well below that for a simulated 150ms RTT.
+    import threading
+    import time as time_module
+
+    import aram_picker.avatars as avatars_module
+
+    monkeypatch.setattr(cache, "_latest_version", lambda: "14.1.1")
+    lock = threading.Lock()
+    active = {"now": 0}
+    peak = {"now": 0}
+
+    def slow_get(url, timeout=0):
+        with lock:
+            active["now"] += 1
+            peak["now"] = max(peak["now"], active["now"])
+        time_module.sleep(0.15)
+        with lock:
+            active["now"] -= 1
+        return FakeResponse(PNG_BYTES)
+
+    monkeypatch.setattr(avatars_module.requests, "get", slow_get)
+
+    pairs = [(i, f"Champ{i}") for i in range(1, 17)]
+    started = time_module.monotonic()
+    cache._download(pairs)
+    elapsed = time_module.monotonic() - started
+
+    assert all(cache.load_icon(i) is not None for i in range(1, 17))
+    assert peak["now"] > 1, "downloads did not run concurrently"
+    assert elapsed < 1.5, f"download too slow: {elapsed:.2f}s"

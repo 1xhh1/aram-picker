@@ -3,6 +3,7 @@
 import base64
 
 import pytest
+from PyQt6.QtCore import QSize
 from PyQt6.QtWidgets import QWidget
 
 from aram_picker.avatars import AvatarCache
@@ -92,3 +93,24 @@ def test_picker_dialog_refreshes_icons_after_download(parent, cache):
     dialog._refresh_icons()
 
     assert 2 in dialog._resolved_ids
+
+
+def test_lists_use_large_icon_size(parent, cache):
+    # Icons must be comfortably visible, not the 16px default.
+    page = ChampSelectPage(make_monitor(), avatars=cache, parent=parent)
+    assert page.bench_list.iconSize() == QSize(32, 32)
+
+    dialog = ChampionPickerDialog(
+        StubMapper().name_map, [], avatars=cache, parent=parent
+    )
+    assert dialog.list_widget.iconSize() == QSize(32, 32)
+
+
+def test_dialog_icon_poll_is_snappy(parent, cache):
+    dialog = ChampionPickerDialog(
+        StubMapper().name_map, ["亚索"], avatars=cache, parent=parent
+    )
+    # Champion 2 still missing -> timer must run at a fast interval.
+    assert dialog._icon_timer is not None
+    assert dialog._icon_timer.isActive()
+    assert dialog._icon_timer.interval() <= 300

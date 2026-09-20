@@ -2,6 +2,7 @@
 
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
@@ -11,6 +12,7 @@ VERSIONS_URL = "https://ddragon.leagueoflegends.com/api/versions.json"
 AVATAR_URL = (
     "https://ddragon.leagueoflegends.com/cdn/{version}/img/champion/{alias}.png"
 )
+MAX_DOWNLOAD_WORKERS = 8
 
 
 def default_avatar_dir():
@@ -63,14 +65,21 @@ class AvatarCache:
             version = self._latest_version()
             if not version:
                 return
-            for champion_id, alias in pending:
+
+            def work(pair):
+                champion_id, alias = pair
                 if self.icon_path(champion_id).exists():
-                    continue
+                    return
                 try:
                     self._download_one(version, champion_id, alias)
                 except (requests.RequestException, OSError):
                     # Single champion failures must not abort the batch.
-                    continue
+                    pass
+
+            # Concurrent pool: ~170 icons over 8 workers instead of one
+            # long sequential chain.
+            with ThreadPoolExecutor(max_workers=MAX_DOWNLOAD_WORKERS) as pool:
+                list(pool.map(work, pending))
         finally:
             with self._lock:
                 self._downloading = False
