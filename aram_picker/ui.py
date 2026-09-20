@@ -16,12 +16,22 @@ from qfluentwidgets import (
     TextEdit, TitleLabel, setTheme, Theme,
 )
 
+from .avatars import AvatarCache
 from .config import AppConfig
 from ._version import __version__
 from .lcu import ChampionNameMapper, LCUConnector
 from .monitor import ChampSelectMonitor
 
 APP_TITLE = f"大乱斗换人助手 v{__version__}"
+
+
+def champion_icon(champion_id, avatars):
+    """Return the cached avatar icon, or a themed placeholder."""
+    if avatars is not None and champion_id is not None:
+        icon = avatars.load_icon(champion_id)
+        if icon is not None:
+            return icon
+    return FluentIcon.PEOPLE.icon()
 
 LOG_COLORS = {
     "success": "#4ECDC4",
@@ -88,7 +98,7 @@ class ChampionPickerDialog(MessageBoxBase):
     QDialog does not get — without it, dark-theme text renders unreadable.
     """
 
-    def __init__(self, name_map, selected_names, parent=None):
+    def __init__(self, name_map, selected_names, avatars=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("编辑本命英雄")
 
@@ -100,12 +110,14 @@ class ChampionPickerDialog(MessageBoxBase):
 
         self.list_widget = ListWidget(self)
         selected = set(selected_names)
+        name_to_id = {name: champion_id for champion_id, name in name_map.items()}
         for name in sorted(name_map.values()):
             item = QListWidgetItem(name)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(
                 Qt.CheckState.Checked if name in selected else Qt.CheckState.Unchecked
             )
+            item.setIcon(champion_icon(name_to_id.get(name), avatars))
             self.list_widget.addItem(item)
 
         self.viewLayout.addWidget(self.titleLabel)
@@ -168,9 +180,10 @@ class PreferenceCard(CardWidget):
 class ChampSelectPage(QWidget):
     """Main page: status card, auto-accept switch and bench champion list."""
 
-    def __init__(self, monitor, parent=None):
+    def __init__(self, monitor, avatars=None, parent=None):
         super().__init__(parent)
         self.monitor = monitor
+        self.avatars = avatars
         self.setObjectName("champSelectPage")
         self._rows = []
 
@@ -291,6 +304,7 @@ class ChampSelectPage(QWidget):
 
     def _update_row(self, index, champion, selected, on_cooldown, state):
         item = self._rows[index]
+        item.setIcon(champion_icon(champion["id"], self.avatars))
         name = champion["name"]
 
         if selected and state == ChampSelectMonitor.STATE_SWAPPING:
@@ -382,10 +396,11 @@ class MainWindow(FluentWindow):
         super().__init__()
         self.lcu = lcu
         self.monitor = monitor
+        self.avatars = AvatarCache()
         self._in_champ_select = False
         self._bridge = MonitorBridge()
 
-        self.champ_page = ChampSelectPage(monitor, self)
+        self.champ_page = ChampSelectPage(monitor, avatars=self.avatars, parent=self)
         self.log_page = LogPage(self)
 
         self._init_window()
@@ -424,6 +439,13 @@ class MainWindow(FluentWindow):
 
         card.auto_swap_switch.checkedChanged.connect(self._toggle_auto_swap)
         card.edit_button.clicked.connect(self._edit_preferences)
+        self._start_avatar_prefetch()
+
+    def _start_avatar_prefetch(self):
+        """Download missing avatars in the background once names are known."""
+        pairs = list(self.monitor.name_mapper.alias_map.items())
+        if pairs:
+            self.avatars.download_async(pairs)
 
     def _toggle_auto_swap(self, enabled):
         self.config.auto_swap_enabled = enabled
@@ -440,7 +462,10 @@ class MainWindow(FluentWindow):
         if self.monitor.name_mapper.name_map:
             return True
         self.monitor.name_mapper.load()
-        return bool(self.monitor.name_mapper.name_map)
+        if self.monitor.name_mapper.name_map:
+            self._start_avatar_prefetch()
+            return True
+        return False
 
     def _edit_preferences(self):
         if not self._ensure_name_map():
@@ -456,7 +481,7 @@ class MainWindow(FluentWindow):
         name_map = self.monitor.name_mapper.name_map
 
         dialog = ChampionPickerDialog(
-            name_map, self.config.preferred_champions, self
+            name_map, self.config.preferred_champions, self.avatars, self
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return

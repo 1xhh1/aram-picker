@@ -133,6 +133,7 @@ class ChampionNameMapper:
 
     def __init__(self, cache_file=None):
         self.name_map = {}
+        self.alias_map = {}
         self.cache_file = cache_file or self._default_cache_file()
 
     @staticmethod
@@ -155,15 +156,38 @@ class ChampionNameMapper:
     def _load_cache(self):
         try:
             data = json.loads(self.cache_file.read_text(encoding="utf-8"))
-            self.name_map = {int(key): value for key, value in data.items()}
-            return bool(self.name_map)
-        except (OSError, ValueError, TypeError, AttributeError):
+        except (OSError, ValueError):
             return False
+
+        if isinstance(data, dict) and "names" in data:
+            # Current format: {"names": {id: name}, "aliases": {id: alias}}
+            names = data.get("names") or {}
+            aliases = data.get("aliases") or {}
+        elif isinstance(data, dict):
+            # Legacy flat format: {id: name} without aliases.
+            names = data
+            aliases = {}
+        else:
+            return False
+
+        try:
+            self.name_map = {int(key): value for key, value in names.items()}
+            self.alias_map = {int(key): value for key, value in aliases.items()}
+        except (ValueError, TypeError, AttributeError):
+            return False
+        return bool(self.name_map)
 
     def _save_cache(self):
         try:
             self.cache_file.parent.mkdir(parents=True, exist_ok=True)
-            content = json.dumps(self.name_map, ensure_ascii=False, indent=2)
+            content = json.dumps(
+                {
+                    "names": self.name_map,
+                    "aliases": self.alias_map,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
             self.cache_file.write_text(content, encoding="utf-8")
         except OSError:
             pass
@@ -174,6 +198,7 @@ class ChampionNameMapper:
             return False
 
         names = {}
+        aliases = {}
         for champion in data:
             if not isinstance(champion, dict):
                 continue
@@ -181,8 +206,12 @@ class ChampionNameMapper:
             name = champion.get("name") or champion.get("alias")
             if isinstance(champion_id, int) and champion_id > 0 and name:
                 names[champion_id] = str(name)
+                alias = champion.get("alias")
+                if alias:
+                    aliases[champion_id] = str(alias)
         if names:
             self.name_map = names
+            self.alias_map = aliases
         return bool(names)
 
     def _fetch_datadragon(self):
@@ -202,9 +231,14 @@ class ChampionNameMapper:
             )
             champions_response.raise_for_status()
             champions = champions_response.json()["data"].values()
-            self.name_map = {
-                int(champion["key"]): champion["name"] for champion in champions
-            }
+            names = {}
+            aliases = {}
+            for champion in champions:
+                champion_id = int(champion["key"])
+                names[champion_id] = champion["name"]
+                aliases[champion_id] = str(champion["id"])
+            self.name_map = names
+            self.alias_map = aliases
             return bool(self.name_map)
         except (requests.RequestException, KeyError, TypeError, ValueError):
             return False
