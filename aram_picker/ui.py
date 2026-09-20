@@ -1,433 +1,124 @@
-import queue
+"""Fluent-style UI for the ARAM bench swap helper (PyQt6 + qfluentwidgets)."""
+
+import html
+import sys
 import time
-import tkinter as tk
 from pathlib import Path
-import customtkinter as ctk
+
+from PyQt6.QtCore import Qt, QObject, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QIcon
+from PyQt6.QtWidgets import (
+    QApplication, QHBoxLayout, QListWidgetItem, QVBoxLayout, QWidget,
+)
+from qfluentwidgets import (
+    CardWidget, FluentIcon, FluentWindow, ListWidget, PushButton,
+    SubtitleLabel, SwitchButton, TextEdit, TitleLabel, setTheme, Theme,
+)
+
+from ._version import __version__
 from .lcu import ChampionNameMapper, LCUConnector
 from .monitor import ChampSelectMonitor
 
+APP_TITLE = f"大乱斗换人助手 v{__version__}"
 
-class App(ctk.CTk):
-    LOG_COLORS = {
-        "success": "#4ECDC4",
-        "error": "#FF6B6B",
-        "warning": "#FFD93D",
-        "info": "#CCCCCC",
-    }
+LOG_COLORS = {
+    "success": "#4ECDC4",
+    "error": "#FF6B6B",
+    "warning": "#FFD93D",
+    "info": "#CCCCCC",
+}
 
-    def __init__(self, lcu, monitor):
-        super().__init__()
-        self.lcu = lcu
+STATE_LABELS = {
+    ChampSelectMonitor.STATE_IDLE: ("等待选人", "gray"),
+    ChampSelectMonitor.STATE_READY: ("就绪", "#4ECDC4"),
+    ChampSelectMonitor.STATE_PENDING: ("等待冷却", "#FFD93D"),
+    ChampSelectMonitor.STATE_SWAPPING: ("交换中", "#FF6B6B"),
+    ChampSelectMonitor.STATE_SWAPPED: ("已交换", "#4ECDC4"),
+}
+
+
+class MonitorBridge(QObject):
+    """Forward monitor thread callbacks to the Qt main thread via signals."""
+
+    entered = pyqtSignal()
+    left = pyqtSignal()
+    stateChanged = pyqtSignal(str)
+    logged = pyqtSignal(str)
+    updated = pyqtSignal()
+    connectionChanged = pyqtSignal(bool)
+
+
+class StatusCard(CardWidget):
+    """Compact card showing connection, champion, countdown and state."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+
+        self.status_label = SubtitleLabel("正在连接客户端...", self)
+        self.status_label.setStyleSheet("color: #CCCCCC;")
+
+        info_row = QHBoxLayout()
+        self.my_champ_label = SubtitleLabel("当前英雄: -", self)
+        self.my_champ_label.setStyleSheet("color: #4ECDC4;")
+        self.state_label = SubtitleLabel("状态: 等待", self)
+        self.state_label.setStyleSheet("color: gray;")
+        info_row.addWidget(self.my_champ_label)
+        info_row.addStretch(1)
+        info_row.addWidget(self.state_label)
+
+        bottom_row = QHBoxLayout()
+        self.countdown_label = TitleLabel("", self)
+        self.countdown_label.setStyleSheet("color: #FF6B6B;")
+        bottom_row.addWidget(self.countdown_label)
+        bottom_row.addStretch(1)
+
+        layout.addWidget(self.status_label)
+        layout.addLayout(info_row)
+        layout.addLayout(bottom_row)
+
+
+class ChampSelectPage(QWidget):
+    """Main page: status card, auto-accept switch and bench champion list."""
+
+    def __init__(self, monitor, parent=None):
+        super().__init__(parent)
         self.monitor = monitor
-        self._in_champ_select = False
-        self._last_signature = None
-        # 监控线程只投递事件，界面更新统一交给主线程处理
-        self._events = queue.SimpleQueue()
-        self._closing = False
+        self.setObjectName("champSelectPage")
+        self._rows = []
 
-        self.title("大乱斗换人助手")
-        self.geometry("700x580")
-        self.resizable(False, False)
-        self.attributes("-topmost", False)
-        self.grid_columnconfigure(0, weight=1, minsize=300)
-        self.grid_columnconfigure(1, weight=1, minsize=380)
-        self.grid_rowconfigure(1, weight=1)
-        self.protocol("WM_DELETE_WINDOW", self._close)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(36, 24, 36, 24)
+        layout.setSpacing(12)
 
-        self._set_icon()
-        self._build_status_bar()
-        self._build_left_panel()
-        self._build_right_panel()
-        self._connect_monitor_events()
-        self.after(100, self._drain_events)
+        title_row = QHBoxLayout()
+        title = TitleLabel("大乱斗换人助手", self)
+        self.auto_accept_switch = SwitchButton(self)
+        switch_label = SubtitleLabel("自动接受对局", self)
+        title_row.addWidget(title)
+        title_row.addStretch(1)
+        title_row.addWidget(switch_label, 0, Qt.AlignmentFlag.AlignRight)
+        title_row.addWidget(self.auto_accept_switch)
 
-    def _set_icon(self):
-        icon_path = Path(__file__).parent / "assets" / "app.ico"
-        try:
-            self.iconbitmap(str(icon_path))
-        except tk.TclError:
-            pass
+        self.status_card = StatusCard(self)
 
-    def _connect_monitor_events(self):
-        self.monitor.on_enter = lambda: self._events.put(("enter", None))
-        self.monitor.on_leave = lambda: self._events.put(("leave", None))
-        self.monitor.on_state_change = lambda state: self._events.put(("state", state))
-        self.monitor.on_log = lambda message: self._events.put(("log", message))
-        self.monitor.on_update = lambda: self._events.put(("update", None))
-        self.monitor.on_connection_change = lambda connected: self._events.put(
-            ("connection", connected)
-        )
+        list_title = SubtitleLabel("替补席英雄（点击换人）", self)
+        self.bench_list = ListWidget(self)
+        self.bench_list.itemClicked.connect(self._on_item_clicked)
 
-    def _drain_events(self):
-        if self._closing:
-            return
+        layout.addLayout(title_row)
+        layout.addWidget(self.status_card)
+        layout.addWidget(list_title)
+        layout.addWidget(self.bench_list, 1)
 
-        refresh_requested = False
-        while True:
-            try:
-                event, value = self._events.get_nowait()
-            except queue.Empty:
-                break
+    def _on_item_clicked(self, item):
+        index = self.bench_list.row(item)
+        if index >= 0:
+            self.select_row(index)
 
-            if event == "enter":
-                self._show_champ_select()
-            elif event == "leave":
-                self._leave_champ_select()
-            elif event == "state":
-                self._update_state_label(str(value))
-            elif event == "log":
-                self._append_log(str(value))
-            elif event == "connection":
-                self._update_connection_status(bool(value))
-            elif event == "update":
-                refresh_requested = True
-
-        if refresh_requested:
-            self._refresh_ui()
-        self.after(100, self._drain_events)
-
-    def _build_status_bar(self):
-        status_frame = ctk.CTkFrame(self, height=52, corner_radius=8)
-        status_frame.grid(
-            row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 5)
-        )
-        status_frame.grid_columnconfigure(0, weight=1)
-
-        self.status_label = ctk.CTkLabel(
-            status_frame,
-            text="正在连接客户端...",
-            font=ctk.CTkFont(size=16, weight="bold"),
-        )
-        self.status_label.grid(row=0, column=0, sticky="w", padx=12, pady=10)
-
-        self.auto_accept_switch = ctk.CTkSwitch(
-            status_frame,
-            text="自动接受对局",
-            font=ctk.CTkFont(size=13),
-            command=self._toggle_auto_accept,
-        )
-        self.auto_accept_switch.grid(row=0, column=1, sticky="e", padx=(0, 8), pady=10)
-
-        self.countdown_label = ctk.CTkLabel(
-            status_frame,
-            text="",
-            font=ctk.CTkFont(size=24, weight="bold"),
-            text_color="#FF6B6B",
-        )
-        self.countdown_label.grid(row=0, column=2, sticky="e", padx=12, pady=10)
-
-    def _build_left_panel(self):
-        left_frame = ctk.CTkFrame(self, corner_radius=8)
-        left_frame.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=5)
-        left_frame.grid_columnconfigure(0, weight=1)
-        left_frame.grid_rowconfigure(2, weight=1)
-
-        info_frame = ctk.CTkFrame(left_frame, fg_color="transparent")
-        info_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
-        info_frame.grid_columnconfigure(0, weight=1)
-        info_frame.grid_columnconfigure(1, weight=1)
-
-        self.my_champ_label = ctk.CTkLabel(
-            info_frame,
-            text="当前英雄: -",
-            font=ctk.CTkFont(size=15, weight="bold"),
-            anchor="w",
-            text_color="#4ECDC4",
-        )
-        self.my_champ_label.grid(row=0, column=0, sticky="w", padx=8, pady=6)
-
-        self.state_label = ctk.CTkLabel(
-            info_frame,
-            text="状态: 等待",
-            font=ctk.CTkFont(size=15, weight="bold"),
-            text_color="gray",
-            anchor="e",
-        )
-        self.state_label.grid(row=0, column=1, sticky="e", padx=8, pady=6)
-
-        separator = ctk.CTkFrame(left_frame, height=2, fg_color="#333333")
-        separator.grid(row=1, column=0, sticky="ew", padx=8, pady=2)
-
-        self.champ_frame = ctk.CTkFrame(left_frame, corner_radius=4)
-        self.champ_frame.grid(row=2, column=0, sticky="nsew", padx=8, pady=4)
-        self.champ_frame.grid_columnconfigure(0, weight=1)
-        self._champ_rows = []
-
-    def _build_right_panel(self):
-        log_frame = ctk.CTkFrame(self, corner_radius=8)
-        log_frame.grid(row=1, column=1, sticky="nsew", padx=(5, 10), pady=5)
-        log_frame.grid_columnconfigure(0, weight=1)
-        log_frame.grid_rowconfigure(1, weight=1)
-
-        title = ctk.CTkLabel(
-            log_frame,
-            text="日志",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            text_color="#888888",
-            anchor="w",
-        )
-        title.grid(row=0, column=0, sticky="w", padx=12, pady=(8, 4))
-
-        self.log_textbox = ctk.CTkTextbox(
-            log_frame,
-            font=ctk.CTkFont(size=13),
-            state="disabled",
-            wrap="word",
-            text_color="#CCCCCC",
-        )
-        self.log_textbox.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
-        for tag, color in self.LOG_COLORS.items():
-            self.log_textbox.tag_config(tag, foreground=color)
-        self.log_textbox.bind("<Button-3>", self._show_log_menu)
-
-    def _show_log_menu(self, event):
-        menu = tk.Menu(self, tearoff=0)
-        menu.add_command(label="清空日志", command=self._clear_log)
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
-
-    def _clear_log(self):
-        self.log_textbox.configure(state="normal")
-        self.log_textbox.delete("1.0", "end")
-        self.log_textbox.configure(state="disabled")
-
-    def _toggle_auto_accept(self):
-        enabled = self.auto_accept_switch.get() == 1
-        self.monitor.set_auto_accept(enabled)
-        self._append_log("已开启自动接受" if enabled else "已关闭自动接受")
-
-    def _update_connection_status(self, connected):
-        if self._in_champ_select:
-            return
-        if connected:
-            self.status_label.configure(
-                text="已连接客户端，等待进入大乱斗选人...", text_color="#4ECDC4"
-            )
-        else:
-            self.status_label.configure(
-                text="客户端未连接，等待重连...", text_color="#FF6B6B"
-            )
-
-    def _show_champ_select(self):
-        self._in_champ_select = True
-        self.deiconify()
-        self.attributes("-topmost", True)
-        self.lift()
-        self.title("大乱斗换人助手 - 选人中")
-
-    def _leave_champ_select(self):
-        self._in_champ_select = False
-        self.attributes("-topmost", False)
-        self.title("大乱斗换人助手")
-        text = (
-            "已连接客户端，等待下一局选人..."
-            if self.lcu.connected
-            else "客户端未连接，等待重连..."
-        )
-        color = "#4ECDC4" if self.lcu.connected else "#FF6B6B"
-        self.status_label.configure(text=text, text_color=color)
-        self.countdown_label.configure(text="")
-        self.my_champ_label.configure(text="当前英雄: -")
-        self.state_label.configure(text="状态: 等待", text_color="gray")
-        for row in self._champ_rows:
-            row["frame"].grid_remove()
-        self._last_signature = None
-
-    def _update_state_label(self, state):
-        labels = {
-            ChampSelectMonitor.STATE_IDLE: ("等待选人", "gray"),
-            ChampSelectMonitor.STATE_READY: ("就绪", "#4ECDC4"),
-            ChampSelectMonitor.STATE_PENDING: ("等待冷却", "#FFD93D"),
-            ChampSelectMonitor.STATE_SWAPPING: ("交换中", "#FF6B6B"),
-            ChampSelectMonitor.STATE_SWAPPED: ("已交换", "#4ECDC4"),
-        }
-        text, color = labels.get(state, (state, "gray"))
-        self.state_label.configure(text=f"状态: {text}", text_color=color)
-
-    @staticmethod
-    def _log_tag(message):
-        if any(word in message for word in ("已交换", "已连接", "已加载", "已开启")):
-            return "success"
-        if any(word in message for word in ("失败", "错误", "异常", "超时", "已关闭", "中断")):
-            return "error"
-        if any(word in message for word in ("冷却", "已登记", "已取消", "被换走", "等待")):
-            return "warning"
-        return "info"
-
-    def _append_log(self, message):
-        timestamp = time.strftime("%H:%M:%S")
-        self.log_textbox.configure(state="normal")
-        self.log_textbox.insert(
-            "end", f"[{timestamp}] {message}\n", self._log_tag(message)
-        )
-        self.log_textbox.see("end")
-        self.log_textbox.configure(state="disabled")
-
-    def _refresh_ui(self):
-        if not self._in_champ_select:
-            return
-        snapshot = self.monitor.get_state_snapshot()
-        countdown = snapshot["countdown"]
-        self.countdown_label.configure(text=f"{countdown}s" if countdown > 0 else "")
-
-        champion_name = snapshot["my_champion_name"]
-        self.my_champ_label.configure(
-            text=f"当前英雄: {champion_name}" if champion_name else "当前英雄: -"
-        )
-
-        state = snapshot["state"]
-        pending = snapshot["pending_target"]
-        if state == ChampSelectMonitor.STATE_PENDING and pending:
-            remaining = snapshot["cooldown_remaining"]
-            self.status_label.configure(
-                text=f"等待: {pending['name']} (冷却 {remaining:.1f}s)",
-                text_color="#FFD93D",
-            )
-            self.state_label.configure(
-                text=f"冷却: {remaining:.1f}s", text_color="#FFD93D"
-            )
-        elif state == ChampSelectMonitor.STATE_READY:
-            text = (
-                "左键选择 / 取消选择"
-                if snapshot["available_champions"]
-                else "等待替补席加载..."
-            )
-            self.status_label.configure(text=text, text_color="#4ECDC4")
-            self.state_label.configure(text="状态: 就绪", text_color="#4ECDC4")
-        elif state == ChampSelectMonitor.STATE_SWAPPING:
-            self.status_label.configure(text="交换验证中...", text_color="#FF6B6B")
-            self.state_label.configure(text="状态: 交换中", text_color="#FF6B6B")
-        elif state == ChampSelectMonitor.STATE_SWAPPED:
-            swapped = snapshot["display_target"]
-            text = f"已交换: {swapped['name']}" if swapped else "交换成功!"
-            self.status_label.configure(text=text, text_color="#4ECDC4")
-            self.state_label.configure(text="状态: 已交换", text_color="#4ECDC4")
-
-        champions = snapshot["available_champions"][:10]
-        target = pending or snapshot["display_target"]
-        target_id = target["id"] if target else None
-        on_cooldown = not snapshot["is_cooldown_over"]
-        signature = (
-            tuple((item["id"], item["name"]) for item in champions),
-            target_id,
-            on_cooldown,
-            state,
-        )
-        if signature == self._last_signature:
-            return
-        self._last_signature = signature
-
-        while len(self._champ_rows) < len(champions):
-            self._create_champ_row(len(self._champ_rows))
-        for index, champion in enumerate(champions):
-            self._update_champ_row(
-                index,
-                champion,
-                champion["id"] == target_id,
-                on_cooldown,
-                state,
-            )
-        for index in range(len(champions), len(self._champ_rows)):
-            self._champ_rows[index]["frame"].grid_remove()
-
-    def _create_champ_row(self, index):
-        frame = ctk.CTkFrame(self.champ_frame, fg_color="transparent", height=40)
-        frame.grid(row=index, column=0, sticky="ew", padx=4, pady=1)
-        frame.grid_columnconfigure(1, weight=1)
-        frame.grid_propagate(False)
-
-        key = ctk.CTkLabel(
-            frame,
-            text="",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            text_color="#888888",
-            fg_color="#2B2B2B",
-            corner_radius=5,
-            width=36,
-        )
-        key.grid(row=0, column=0, padx=(6, 10), pady=5)
-        name = ctk.CTkLabel(
-            frame,
-            text="",
-            font=ctk.CTkFont(size=15),
-            text_color="#FFFFFF",
-            anchor="w",
-        )
-        name.grid(row=0, column=1, sticky="w", padx=4, pady=5)
-        check = ctk.CTkLabel(
-            frame, text="", font=ctk.CTkFont(size=16), text_color="#666666", width=28
-        )
-        check.grid(row=0, column=2, padx=(4, 8), pady=5)
-        separator = ctk.CTkFrame(frame, height=1, fg_color="#2A2A2A")
-        separator.grid(row=1, column=0, columnspan=3, sticky="ew", padx=6)
-
-        row = {
-            "frame": frame,
-            "key": key,
-            "name": name,
-            "check": check,
-            "normal_bg": "transparent",
-            "hover_bg": "#1E1E2E",
-        }
-
-        def select(_event):
-            self._select_row(index)
-
-        def highlight(_event):
-            frame.configure(fg_color=row["hover_bg"])
-
-        def unhighlight(_event):
-            frame.configure(fg_color=row["normal_bg"])
-
-        for widget in (frame, key, name, check):
-            widget.bind("<Button-1>", select)
-            widget.bind("<Enter>", highlight)
-            widget.bind("<Leave>", unhighlight)
-        self._champ_rows.append(row)
-
-    def _update_champ_row(
-        self,
-        index,
-        champion,
-        selected,
-        on_cooldown,
-        state,
-    ):
-        row = self._champ_rows[index]
-        frame = row["frame"]
-        if not frame.winfo_ismapped():
-            frame.grid()
-
-        row["normal_bg"] = "#2A2D3E" if selected else "transparent"
-        row["hover_bg"] = "#3A3D4E" if selected else "#1E1E2E"
-        frame.configure(fg_color=row["normal_bg"])
-        row["key"].configure(text=f" {index + 1} ")
-
-        name = champion["name"]
-        if selected and state == ChampSelectMonitor.STATE_SWAPPING:
-            text, color, weight = f"⟳ {name}", "#FF6B6B", "bold"
-        elif selected and state == ChampSelectMonitor.STATE_SWAPPED:
-            text, color, weight = f"✓ {name}", "#4ECDC4", "bold"
-        elif selected:
-            text, color, weight = name, "#FFD93D", "bold"
-        elif on_cooldown:
-            text, color, weight = name, "#888888", "normal"
-        else:
-            text, color, weight = name, "#FFFFFF", "normal"
-        row["name"].configure(
-            text=text,
-            font=ctk.CTkFont(size=15, weight=weight),
-            text_color=color,
-        )
-        row["check"].configure(
-            text="☑" if selected else "☐",
-            text_color="#FFD93D" if selected else "#666666",
-        )
-
-    def _select_row(self, index):
-        if not self._in_champ_select:
+    def select_row(self, index):
+        if not self.monitor.in_champ_select:
             return
         snapshot = self.monitor.get_state_snapshot()
         pending = snapshot["pending_target"]
@@ -442,23 +133,268 @@ class App(ctk.CTk):
                     return
         self.monitor.request_swap(index)
 
-    def _close(self):
-        if self._closing:
+    def refresh(self):
+        snapshot = self.monitor.get_state_snapshot()
+        card = self.status_card
+
+        countdown = snapshot["countdown"]
+        card.countdown_label.setText(f"{countdown}s" if countdown > 0 else "")
+
+        champion_name = snapshot["my_champion_name"]
+        card.my_champ_label.setText(
+            f"当前英雄: {champion_name}" if champion_name else "当前英雄: -"
+        )
+
+        state = snapshot["state"]
+        pending = snapshot["pending_target"]
+        if state == ChampSelectMonitor.STATE_PENDING and pending:
+            remaining = snapshot["cooldown_remaining"]
+            card.status_label.setText(f"等待: {pending['name']} (冷却 {remaining:.1f}s)")
+            card.status_label.setStyleSheet("color: #FFD93D;")
+            card.state_label.setText(f"冷却: {remaining:.1f}s")
+            card.state_label.setStyleSheet("color: #FFD93D;")
+        elif state == ChampSelectMonitor.STATE_READY:
+            text = (
+                "左键选择 / 取消选择"
+                if snapshot["available_champions"]
+                else "等待替补席加载..."
+            )
+            card.status_label.setText(text)
+            card.status_label.setStyleSheet("color: #4ECDC4;")
+            card.state_label.setText("状态: 就绪")
+            card.state_label.setStyleSheet("color: #4ECDC4;")
+        elif state == ChampSelectMonitor.STATE_SWAPPING:
+            card.status_label.setText("交换验证中...")
+            card.status_label.setStyleSheet("color: #FF6B6B;")
+            card.state_label.setText("状态: 交换中")
+            card.state_label.setStyleSheet("color: #FF6B6B;")
+        elif state == ChampSelectMonitor.STATE_SWAPPED:
+            swapped = snapshot["display_target"]
+            card.status_label.setText(f"已交换: {swapped['name']}" if swapped else "交换成功!")
+            card.status_label.setStyleSheet("color: #4ECDC4;")
+            card.state_label.setText("状态: 已交换")
+            card.state_label.setStyleSheet("color: #4ECDC4;")
+
+        champions = snapshot["available_champions"][:10]
+        target = pending or snapshot["display_target"]
+        target_id = target["id"] if target else None
+        on_cooldown = not snapshot["is_cooldown_over"]
+
+        while len(self._rows) < len(champions):
+            self._append_row()
+        for index, champion in enumerate(champions):
+            self._update_row(
+                index,
+                champion,
+                champion["id"] == target_id,
+                on_cooldown,
+                state,
+            )
+        # Drop rows that are no longer in the snapshot.
+        while len(self._rows) > len(champions):
+            self.bench_list.takeItem(len(self._rows) - 1)
+            self._rows.pop()
+
+    def _append_row(self):
+        item = QListWidgetItem()
+        item.setFont(QFont("Microsoft YaHei UI", 11))
+        self.bench_list.addItem(item)
+        self._rows.append(item)
+
+    def _update_row(self, index, champion, selected, on_cooldown, state):
+        item = self._rows[index]
+        name = champion["name"]
+
+        if selected and state == ChampSelectMonitor.STATE_SWAPPING:
+            text, color, bold = f"⟳ {name}", "#FF6B6B", True
+        elif selected and state == ChampSelectMonitor.STATE_SWAPPED:
+            text, color, bold = f"✓ {name}", "#4ECDC4", True
+        elif selected:
+            text, color, bold = name, "#FFD93D", True
+        elif on_cooldown:
+            text, color, bold = name, "#888888", False
+        else:
+            text, color, bold = name, "#FFFFFF", False
+
+        item.setText(f"{index + 1}   {'☑' if selected else '☐'}   {text}")
+        font = QFont("Microsoft YaHei UI", 11)
+        font.setBold(bold)
+        item.setFont(font)
+        item.setForeground(QColor(color))
+        if selected:
+            item.setBackground(QColor("#2A2D3E"))
+        else:
+            item.setBackground(QColor(0, 0, 0, 0))
+
+    def reset(self):
+        card = self.status_card
+        card.countdown_label.setText("")
+        card.my_champ_label.setText("当前英雄: -")
+        card.state_label.setText("状态: 等待")
+        card.state_label.setStyleSheet("color: gray;")
+        self.bench_list.clear()
+        self._rows.clear()
+
+
+class LogPage(QWidget):
+    """Log page: colored log output with clear button."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("logPage")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(36, 24, 36, 24)
+        layout.setSpacing(12)
+
+        title_row = QHBoxLayout()
+        title = TitleLabel("日志", self)
+        self.clear_button = PushButton(FluentIcon.DELETE, "清空日志", self)
+        title_row.addWidget(title)
+        title_row.addStretch(1)
+        title_row.addWidget(self.clear_button)
+
+        self.log_edit = TextEdit(self)
+        self.log_edit.setReadOnly(True)
+        self.log_edit.setLineWrapMode(TextEdit.LineWrapMode.WidgetWidth)
+
+        layout.addLayout(title_row)
+        layout.addWidget(self.log_edit, 1)
+
+        self.clear_button.clicked.connect(self.clear)
+
+    @staticmethod
+    def log_tag(message):
+        # Classify log lines by keyword, mirroring the original tkinter tags.
+        if any(word in message for word in ("已交换", "已连接", "已加载", "已开启")):
+            return "success"
+        if any(word in message for word in ("失败", "错误", "异常", "超时", "已关闭", "中断")):
+            return "error"
+        if any(word in message for word in ("冷却", "已登记", "已取消", "被换走", "等待")):
+            return "warning"
+        return "info"
+
+    def append(self, message):
+        timestamp = time.strftime("%H:%M:%S")
+        color = LOG_COLORS[self.log_tag(message)]
+        safe_message = html.escape(message)
+        self.log_edit.append(
+            f'<span style="color:{color};">[{timestamp}] {safe_message}</span>'
+        )
+        self.log_edit.ensureCursorVisible()
+
+    def clear(self):
+        self.log_edit.clear()
+
+
+class MainWindow(FluentWindow):
+    """Fluent navigation window hosting the champ select and log pages."""
+
+    def __init__(self, lcu, monitor):
+        super().__init__()
+        self.lcu = lcu
+        self.monitor = monitor
+        self._in_champ_select = False
+        self._bridge = MonitorBridge()
+
+        self.champ_page = ChampSelectPage(monitor, self)
+        self.log_page = LogPage(self)
+
+        self._init_window()
+        self._init_navigation()
+        self._connect_monitor_events()
+
+    def _init_window(self):
+        self.setWindowTitle(APP_TITLE)
+        self.resize(760, 620)
+        icon_path = Path(__file__).parent / "assets" / "app.ico"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
+
+    def _init_navigation(self):
+        self.addSubInterface(
+            self.champ_page, FluentIcon.GAME, "选人"
+        )
+        self.addSubInterface(
+            self.log_page, FluentIcon.DOCUMENT, "日志"
+        )
+
+    def _connect_monitor_events(self):
+        # Monitor callbacks run in a background thread; signals marshal
+        # them into the Qt main thread (queued connections).
+        self.monitor.on_enter = self._bridge.entered.emit
+        self.monitor.on_leave = self._bridge.left.emit
+        self.monitor.on_state_change = self._bridge.stateChanged.emit
+        self.monitor.on_log = self._bridge.logged.emit
+        self.monitor.on_update = self._bridge.updated.emit
+        self.monitor.on_connection_change = self._bridge.connectionChanged.emit
+
+        self._bridge.entered.connect(self._show_champ_select)
+        self._bridge.left.connect(self._leave_champ_select)
+        self._bridge.stateChanged.connect(self._update_state_label)
+        self._bridge.logged.connect(self.log_page.append)
+        self._bridge.updated.connect(self.champ_page.refresh)
+        self._bridge.connectionChanged.connect(self._update_connection_status)
+
+        self.champ_page.auto_accept_switch.checkedChanged.connect(
+            self._toggle_auto_accept
+        )
+
+    def _toggle_auto_accept(self, enabled):
+        self.monitor.set_auto_accept(enabled)
+        self.log_page.append("已开启自动接受" if enabled else "已关闭自动接受")
+
+    def _update_connection_status(self, connected):
+        if self._in_champ_select:
             return
-        self._closing = True
+        label = self.champ_page.status_card.status_label
+        if connected:
+            label.setText("已连接客户端，等待进入大乱斗选人...")
+            label.setStyleSheet("color: #4ECDC4;")
+        else:
+            label.setText("客户端未连接，等待重连...")
+            label.setStyleSheet("color: #FF6B6B;")
+
+    def _show_champ_select(self):
+        self._in_champ_select = True
+        self.setWindowTitle(f"{APP_TITLE} - 选人中")
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _leave_champ_select(self):
+        self._in_champ_select = False
+        self.setWindowTitle(APP_TITLE)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+        self.show()
+        self.champ_page.reset()
+        self._update_connection_status(self.lcu.connected)
+
+    def _update_state_label(self, state):
+        text, color = STATE_LABELS.get(state, (state, "gray"))
+        label = self.champ_page.status_card.state_label
+        label.setText(f"状态: {text}")
+        label.setStyleSheet(f"color: {color};")
+
+    def closeEvent(self, event):
         self.monitor.stop()
-        self.destroy()
+        super().closeEvent(event)
 
 
 def run():
-    ctk.set_appearance_mode("dark")
-    ctk.set_default_color_theme("blue")
+    # Dark theme keeps custom status colors readable.
+    setTheme(Theme.DARK)
 
     lcu = LCUConnector()
     monitor = ChampSelectMonitor(lcu, ChampionNameMapper())
-    app = App(lcu, monitor)
+
+    app = QApplication(sys.argv)
+    window = MainWindow(lcu, monitor)
+    window.show()
+
     monitor.start()
     try:
-        app.mainloop()
+        sys.exit(app.exec())
     finally:
         monitor.stop()
