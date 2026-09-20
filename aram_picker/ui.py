@@ -11,9 +11,9 @@ from PyQt6.QtWidgets import (
     QApplication, QDialog, QHBoxLayout, QListWidgetItem, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
-    BodyLabel, CardWidget, FluentIcon, FluentWindow, ListWidget, PushButton,
-    PrimaryPushButton, SearchLineEdit, SubtitleLabel, SwitchButton, TextEdit,
-    TitleLabel, setTheme, Theme,
+    BodyLabel, CardWidget, FluentIcon, FluentWindow, InfoBar, ListWidget,
+    PushButton, PrimaryPushButton, SearchLineEdit, SubtitleLabel, SwitchButton,
+    TextEdit, TitleLabel, setTheme, Theme,
 )
 
 from .config import AppConfig
@@ -435,11 +435,29 @@ class MainWindow(FluentWindow):
         self.monitor.set_auto_swap(enabled)
         self.log_page.append("已开启自动换本命" if enabled else "已关闭自动换本命")
 
+    def _ensure_name_map(self):
+        """Populate the champion name map even without an LCU connection.
+
+        Falls back to the on-disk cache and then Data Dragon, so the
+        preference editor works while the game client is closed.
+        """
+        if self.monitor.name_mapper.name_map:
+            return True
+        self.monitor.name_mapper.load()
+        return bool(self.monitor.name_mapper.name_map)
+
     def _edit_preferences(self):
-        name_map = self.monitor.name_mapper.name_map
-        if not name_map:
+        if not self._ensure_name_map():
+            # Visible warning on the current window, not just the log page.
+            InfoBar.warning(
+                title="英雄名单加载失败",
+                content="请连接客户端或检查网络后重试",
+                parent=self,
+                duration=3000,
+            )
             self.log_page.append("英雄名单未加载，暂无法编辑本命列表")
             return
+        name_map = self.monitor.name_mapper.name_map
 
         dialog = ChampionPickerDialog(
             name_map, self.config.preferred_champions, self
