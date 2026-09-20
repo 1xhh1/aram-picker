@@ -50,6 +50,10 @@ class ChampSelectMonitor:
         self.auto_accept_enabled = False
         self._ready_check_accepted = False
 
+        # Auto preferred-champion swap state
+        self.auto_swap_enabled = False
+        self._preference_names = []
+
         self.on_enter = None
         self.on_leave = None
         self.on_state_change = None
@@ -95,6 +99,15 @@ class ChampSelectMonitor:
             if not enabled:
                 self._ready_check_accepted = False
 
+    def set_auto_swap(self, enabled):
+        with self._lock:
+            self.auto_swap_enabled = enabled
+
+    def set_preferences(self, names):
+        """Set preferred champion names, highest priority first."""
+        with self._lock:
+            self._preference_names = [str(name) for name in names]
+
     def request_swap(self, index):
         job = None
         with self._lock:
@@ -134,6 +147,44 @@ class ChampSelectMonitor:
             self._set_state(self.STATE_READY)
         self._log(f"已取消: {name}")
         return True
+
+    def _auto_swap_check(self):
+        """Auto-swap to the highest-priority preferred champion on the bench.
+
+        Skipped when a manual pending target exists, when already playing a
+        preferred champion, or outside champ select. During swap cooldown the
+        target is registered as pending and executed later by _tick.
+        """
+        index = None
+        with self._lock:
+            if not self.auto_swap_enabled or not self._preference_names:
+                return
+            if not self.in_champ_select or not self.bench_enabled:
+                return
+            if self.pending_target or self.state != self.STATE_READY:
+                return
+
+            name_to_id = {
+                name: champion_id
+                for champion_id, name in self.name_mapper.name_map.items()
+            }
+            preferred_ids = [
+                name_to_id[name]
+                for name in self._preference_names
+                if name in name_to_id
+            ]
+            if self._my_champion_id in preferred_ids:
+                return
+            for champion_id in preferred_ids:
+                for bench_index, champion in enumerate(self.available_champions):
+                    if champion["id"] == champion_id:
+                        index = bench_index
+                        break
+                if index is not None:
+                    break
+
+        if index is not None:
+            self.request_swap(index)
 
     def _loop(self):
         while not self._stop_event.is_set():
@@ -188,6 +239,7 @@ class ChampSelectMonitor:
         if not self.in_champ_select:
             self._enter_champ_select()
         self._parse_session(session)
+        self._auto_swap_check()
         self._tick()
         if self.on_update:
             self.on_update()

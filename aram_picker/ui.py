@@ -8,13 +8,15 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QObject, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon
 from PyQt6.QtWidgets import (
-    QApplication, QHBoxLayout, QListWidgetItem, QVBoxLayout, QWidget,
+    QApplication, QDialog, QHBoxLayout, QListWidgetItem, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
-    CardWidget, FluentIcon, FluentWindow, ListWidget, PushButton,
-    SubtitleLabel, SwitchButton, TextEdit, TitleLabel, setTheme, Theme,
+    BodyLabel, CardWidget, FluentIcon, FluentWindow, ListWidget, PushButton,
+    PrimaryPushButton, SearchLineEdit, SubtitleLabel, SwitchButton, TextEdit,
+    TitleLabel, setTheme, Theme,
 )
 
+from .config import AppConfig
 from ._version import __version__
 from .lcu import ChampionNameMapper, LCUConnector
 from .monitor import ChampSelectMonitor
@@ -79,6 +81,94 @@ class StatusCard(CardWidget):
         layout.addLayout(bottom_row)
 
 
+class ChampionPickerDialog(QDialog):
+    """Dialog for picking preferred champions with search and checkboxes."""
+
+    def __init__(self, name_map, selected_names, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("编辑本命英雄")
+        self.resize(360, 480)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+
+        self.search_box = SearchLineEdit(self)
+        self.search_box.setPlaceholderText("搜索英雄")
+        self.search_box.textChanged.connect(self._filter)
+
+        self.list_widget = ListWidget(self)
+        selected = set(selected_names)
+        for name in sorted(name_map.values()):
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked if name in selected else Qt.CheckState.Unchecked
+            )
+            self.list_widget.addItem(item)
+
+        button_row = QHBoxLayout()
+        self.cancel_button = PushButton("取消", self)
+        self.ok_button = PrimaryPushButton(FluentIcon.ACCEPT, "确定", self)
+        button_row.addWidget(self.cancel_button)
+        button_row.addStretch(1)
+        button_row.addWidget(self.ok_button)
+
+        layout.addWidget(self.search_box)
+        layout.addWidget(self.list_widget, 1)
+        layout.addLayout(button_row)
+
+        self.cancel_button.clicked.connect(self.reject)
+        self.ok_button.clicked.connect(self.accept)
+
+    def _filter(self, text):
+        # Hide items that do not contain the search text.
+        for index in range(self.list_widget.count()):
+            item = self.list_widget.item(index)
+            item.setHidden(text not in item.text())
+
+    def selected_names(self):
+        """Return checked names in list order (higher up = higher priority)."""
+        return [
+            self.list_widget.item(index).text()
+            for index in range(self.list_widget.count())
+            if self.list_widget.item(index).checkState() == Qt.CheckState.Checked
+        ]
+
+
+class PreferenceCard(CardWidget):
+    """Card for the auto preferred-champion swap settings."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(20, 14, 20, 14)
+
+        text_column = QVBoxLayout()
+        text_column.setSpacing(2)
+        title = SubtitleLabel("自动换本命", self)
+        self.names_label = BodyLabel("未设置", self)
+        text_column.addWidget(title)
+        text_column.addWidget(self.names_label)
+
+        self.auto_swap_switch = SwitchButton(self)
+        self.edit_button = PushButton(FluentIcon.EDIT, "编辑", self)
+
+        layout.addLayout(text_column, 1)
+        layout.addWidget(self.edit_button)
+        layout.addWidget(self.auto_swap_switch)
+
+    def set_preferences(self, names):
+        """Show the ordered preference list, numbered by priority."""
+        if names:
+            display = "  ".join(
+                f"{index}. {name}" for index, name in enumerate(names, start=1)
+            )
+        else:
+            display = "未设置"
+        self.names_label.setText(display)
+
+
 class ChampSelectPage(QWidget):
     """Main page: status card, auto-accept switch and bench champion list."""
 
@@ -102,6 +192,7 @@ class ChampSelectPage(QWidget):
         title_row.addWidget(self.auto_accept_switch)
 
         self.status_card = StatusCard(self)
+        self.preference_card = PreferenceCard(self)
 
         list_title = SubtitleLabel("替补席英雄（点击换人）", self)
         self.bench_list = ListWidget(self)
@@ -109,6 +200,7 @@ class ChampSelectPage(QWidget):
 
         layout.addLayout(title_row)
         layout.addWidget(self.status_card)
+        layout.addWidget(self.preference_card)
         layout.addWidget(list_title)
         layout.addWidget(self.bench_list, 1)
 
@@ -302,6 +394,7 @@ class MainWindow(FluentWindow):
 
         self._init_window()
         self._init_navigation()
+        self._init_preferences()
         self._connect_monitor_events()
 
     def _init_window(self):
@@ -318,6 +411,49 @@ class MainWindow(FluentWindow):
         self.addSubInterface(
             self.log_page, FluentIcon.DOCUMENT, "日志"
         )
+
+    def _init_preferences(self):
+        """Load persisted preferences and apply them to monitor and UI."""
+        self.config = AppConfig()
+        self.config.load()
+
+        self.monitor.set_auto_swap(self.config.auto_swap_enabled)
+        self.monitor.set_preferences(self.config.preferred_champions)
+
+        card = self.champ_page.preference_card
+        card.set_preferences(self.config.preferred_champions)
+        card.auto_swap_switch.blockSignals(True)
+        card.auto_swap_switch.setChecked(self.config.auto_swap_enabled)
+        card.auto_swap_switch.blockSignals(False)
+
+        card.auto_swap_switch.checkedChanged.connect(self._toggle_auto_swap)
+        card.edit_button.clicked.connect(self._edit_preferences)
+
+    def _toggle_auto_swap(self, enabled):
+        self.config.auto_swap_enabled = enabled
+        self.config.save()
+        self.monitor.set_auto_swap(enabled)
+        self.log_page.append("已开启自动换本命" if enabled else "已关闭自动换本命")
+
+    def _edit_preferences(self):
+        name_map = self.monitor.name_mapper.name_map
+        if not name_map:
+            self.log_page.append("英雄名单未加载，暂无法编辑本命列表")
+            return
+
+        dialog = ChampionPickerDialog(
+            name_map, self.config.preferred_champions, self
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        names = dialog.selected_names()
+        self.config.preferred_champions = names
+        self.config.save()
+        self.monitor.set_preferences(names)
+        self.champ_page.preference_card.set_preferences(names)
+        display = "、".join(names) if names else "空"
+        self.log_page.append(f"本命列表已更新: {display}")
 
     def _connect_monitor_events(self):
         # Monitor callbacks run in a background thread; signals marshal
