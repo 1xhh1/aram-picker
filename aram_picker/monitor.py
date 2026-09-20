@@ -53,6 +53,7 @@ class ChampSelectMonitor:
         # Auto preferred-champion swap state
         self.auto_swap_enabled = False
         self._preference_names = []
+        self._auto_swap_disabled = False
 
         self.on_enter = None
         self.on_leave = None
@@ -108,7 +109,8 @@ class ChampSelectMonitor:
         with self._lock:
             self._preference_names = [str(name) for name in names]
 
-    def request_swap(self, index):
+    def request_swap(self, index, manual=True):
+        """Request a bench swap; manual swaps disable auto swap this session."""
         job = None
         with self._lock:
             if not self.in_champ_select or not self.bench_enabled:
@@ -117,6 +119,9 @@ class ChampSelectMonitor:
                 return False
             if not 0 <= index < len(self.available_champions):
                 return False
+            if manual:
+                # The player made an explicit choice; stop overriding it.
+                self._auto_swap_disabled = True
 
             champion = dict(self.available_champions[index])
             self.pending_target = champion
@@ -159,6 +164,8 @@ class ChampSelectMonitor:
         with self._lock:
             if not self.auto_swap_enabled or not self._preference_names:
                 return
+            if self._auto_swap_disabled:
+                return
             if not self.in_champ_select or not self.bench_enabled:
                 return
             if self.pending_target or self.state != self.STATE_READY:
@@ -184,7 +191,7 @@ class ChampSelectMonitor:
                     break
 
         if index is not None:
-            self.request_swap(index)
+            self.request_swap(index, manual=False)
 
     def _loop(self):
         while not self._stop_event.is_set():
@@ -281,6 +288,7 @@ class ChampSelectMonitor:
             self._swap_started_at = 0.0
             self._swap_epoch += 1
             self._swap_http_succeeded = False
+            self._auto_swap_disabled = False
             self._set_state(self.STATE_READY)
         self._log("进入选人阶段")
         if self.on_enter:

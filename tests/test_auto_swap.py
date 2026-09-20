@@ -219,6 +219,82 @@ def test_auto_swap_ignores_unknown_names():
     assert lcu.posts == [f"/lol-champ-select/v1/session/bench/swap/{YASUO_ID}"]
 
 
+def test_auto_swap_retries_after_failed_attempt():
+    lcu = FakeLcu()
+    clock = FakeClock()
+    monitor = make_monitor(lcu, clock)
+    monitor.set_auto_swap(True)
+    monitor.set_preferences(["亚索"])
+
+    # First attempt fires immediately.
+    enter_champ_select(monitor, lcu, make_session([TEEMO_ID, YASUO_ID]))
+    wait_for_posts(lcu)
+    assert len(lcu.posts) == 1
+
+    # Teammate snipes Yasuo: bench loses him, swap verify times out.
+    clock.now += monitor.SWAP_MAX_WAIT + 1
+    lcu.session_response = make_session([TEEMO_ID])
+    monitor._poll_once()
+    with monitor._lock:
+        assert monitor.state == monitor.STATE_READY
+        assert monitor.pending_target is None
+
+    # Yasuo comes back on the bench; auto swap must try again.
+    lcu.session_response = make_session([TEEMO_ID, YASUO_ID])
+    monitor._poll_once()
+
+    wait_for_posts(lcu, expected=2)
+    assert len(lcu.posts) == 2
+
+
+def test_manual_swap_disables_auto_for_session():
+    lcu = FakeLcu()
+    clock = FakeClock()
+    monitor = make_monitor(lcu, clock)
+    monitor.set_preferences(["亚索"])
+
+    # Player manually swaps to a non-preferred champion first.
+    enter_champ_select(monitor, lcu, make_session([TEEMO_ID, YASUO_ID]))
+    monitor.request_swap(0)  # manual: picks teemo
+    with monitor._lock:
+        monitor.state = monitor.STATE_READY
+        monitor._my_champion_id = TEEMO_ID
+        monitor.pending_target = None
+
+    monitor.set_auto_swap(True)
+    lcu.session_response = make_session(
+        [YASUO_ID], my_champion_id=TEEMO_ID
+    )
+    monitor._poll_once()
+
+    time.sleep(0.2)
+    assert lcu.posts == [] or all("swap/1" not in p for p in lcu.posts)
+
+
+def test_auto_swap_resets_next_session():
+    lcu = FakeLcu()
+    clock = FakeClock()
+    monitor = make_monitor(lcu, clock)
+    monitor.set_auto_swap(True)
+    monitor.set_preferences(["亚索"])
+
+    enter_champ_select(monitor, lcu, make_session([TEEMO_ID, YASUO_ID]))
+    wait_for_posts(lcu)
+    assert len(lcu.posts) == 1
+
+    # Leave champ select, then a new game starts.
+    lcu.session_response = None
+    monitor._poll_once()
+    assert not monitor.in_champ_select
+
+    lcu.session_response = make_session([TEEMO_ID, YASUO_ID])
+    monitor._poll_once()
+    monitor._poll_once()
+
+    wait_for_posts(lcu, expected=2)
+    assert len(lcu.posts) == 2
+
+
 def test_auto_swap_noop_when_preferred_not_on_bench():
     lcu = FakeLcu()
     monitor = make_monitor(lcu, FakeClock())
