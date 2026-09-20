@@ -25,6 +25,39 @@ from .monitor import ChampSelectMonitor
 
 APP_TITLE = f"大乱斗换人助手 v{__version__}"
 
+DISCLAIMER_TEXT = (
+    "本项目通过读取英雄联盟客户端本机提供的 LCU 接口，获取当前大乱斗选人状态，"
+    "但仍然无法承诺绝对不会封号，使用前请自行评估封号风险。"
+    "本项目与 Riot Games 无隶属、授权或赞助关系，仅供学习交流使用。"
+    "使用过程中请自行遵守相关游戏规则和服务协议！！！"
+)
+
+
+class DisclaimerDialog(MessageBoxBase):
+    """Forced startup disclaimer; the service only starts after acceptance."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("免责声明")
+
+        self.titleLabel = SubtitleLabel("免责声明", self)
+        self.disclaimer_label = BodyLabel(DISCLAIMER_TEXT, self)
+        self.disclaimer_label.setWordWrap(True)
+        self.disclaimer_label.setStyleSheet("color: red;")
+
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.addWidget(self.disclaimer_label)
+
+        self.yesButton.setText("我已知晓风险，继续使用")
+        self.cancelButton.setText("退出")
+        self.widget.setFixedWidth(480)
+
+
+def confirm_disclaimer(parent=None):
+    """Show the disclaimer; True only when the user explicitly accepts."""
+    dialog = DisclaimerDialog(parent)
+    return dialog.exec() == QDialog.DialogCode.Accepted
+
 
 def champion_icon(champion_id, avatars):
     """Return the cached avatar icon, or a themed placeholder."""
@@ -339,6 +372,11 @@ class ChampSelectPage(QWidget):
         layout.addWidget(self.preference_card)
         layout.addWidget(list_title)
         layout.addWidget(self.bench_list, 1)
+
+        self.disclaimer_label = BodyLabel(DISCLAIMER_TEXT, self)
+        self.disclaimer_label.setWordWrap(True)
+        self.disclaimer_label.setStyleSheet("color: red;")
+        layout.addWidget(self.disclaimer_label)
 
     def _on_item_clicked(self, item):
         index = self.bench_list.row(item)
@@ -705,6 +743,11 @@ def run():
     app = QApplication(sys.argv)
     window = MainWindow(lcu, monitor)
     window.show()
+
+    # The service (LCU polling) only starts after the disclaimer is accepted.
+    if not confirm_disclaimer(window):
+        window.close()
+        return
 
     # Warm up names and avatars in the background (no client needed).
     threading.Thread(target=window._background_init, daemon=True).start()
