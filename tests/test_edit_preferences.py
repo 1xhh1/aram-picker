@@ -29,7 +29,7 @@ def make_window(mapper):
     return MainWindow(lcu, monitor)
 
 
-def test_ensure_name_map_loads_from_cache_without_client(qapp, tmp_path):
+def test_ensure_name_map_loads_from_cache_without_client(qapp, tmp_path, monkeypatch):
     # Reproduces the bug: mapper is empty, LCU never connected, but a
     # champion-name cache file from a previous run exists on disk.
     cache = tmp_path / "champion_names.json"
@@ -38,6 +38,8 @@ def test_ensure_name_map_loads_from_cache_without_client(qapp, tmp_path):
     )
     mapper = ChampionNameMapper(cache_file=cache)
     assert mapper.name_map == {}
+    # Offline: the alias-upgrade fetch must not break the cache hit.
+    monkeypatch.setattr(mapper, "_fetch_datadragon", lambda: False)
 
     window = make_window(mapper)
 

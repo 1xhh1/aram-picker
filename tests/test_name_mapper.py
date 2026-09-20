@@ -87,3 +87,45 @@ def test_legacy_flat_cache_still_loads_names(tmp_path):
     assert mapper._load_cache() is True
     assert mapper.name_map == {157: "疾风剑豪"}
     assert mapper.alias_map == {}
+
+
+def test_load_upgrades_legacy_cache_with_aliases(tmp_path, monkeypatch):
+    # Regression: a legacy cache hit must not skip alias fetching,
+    # otherwise avatars can never be downloaded.
+    import aram_picker.lcu as lcu_module
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    payload = {
+        "data": {
+            "Yasuo": {"key": "157", "id": "Yasuo", "name": "疾风剑豪"},
+        }
+    }
+
+    def fake_get(url, timeout=0):
+        if "versions.json" in url:
+            return FakeResponse(["14.1.1"])
+        return FakeResponse(payload)
+
+    monkeypatch.setattr(lcu_module.requests, "get", fake_get)
+
+    path = tmp_path / "champion_names.json"
+    path.write_text(json.dumps({"157": "疾风剑豪"}), encoding="utf-8")
+    mapper = ChampionNameMapper(cache_file=path)
+
+    assert mapper.load() is True
+    assert mapper.name_map == {157: "疾风剑豪"}
+    assert mapper.alias_map == {157: "Yasuo"}
+
+    # Upgraded cache is persisted with aliases.
+    restored = ChampionNameMapper(cache_file=path)
+    assert restored._load_cache() is True
+    assert restored.alias_map == {157: "Yasuo"}

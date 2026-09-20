@@ -74,3 +74,21 @@ def test_picker_dialog_items_show_cached_avatar(parent, cache):
     # Items are sorted by Unicode: 亚索 first, 金克丝 second.
     assert not dialog.list_widget.item(0).icon().isNull()
     assert not dialog.list_widget.item(1).icon().isNull()
+    assert 1 in dialog._resolved_ids
+    assert 2 not in dialog._resolved_ids
+
+
+def test_picker_dialog_refreshes_icons_after_download(parent, cache):
+    # Regression: avatars downloaded after the dialog opened must show up.
+    mapper = StubMapper()
+    dialog = ChampionPickerDialog(
+        mapper.name_map, [], avatars=cache, parent=parent
+    )
+    assert 1 in dialog._resolved_ids
+    assert 2 not in dialog._resolved_ids
+
+    # The background download finishes for champion 2.
+    cache.icon_path(2).write_bytes(PNG_BYTES)
+    dialog._refresh_icons()
+
+    assert 2 in dialog._resolved_ids

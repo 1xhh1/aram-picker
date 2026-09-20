@@ -5,7 +5,7 @@ import sys
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QObject, pyqtSignal
+from PyQt6.QtCore import Qt, QObject, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QHBoxLayout, QListWidgetItem, QVBoxLayout, QWidget,
@@ -100,6 +100,7 @@ class ChampionPickerDialog(MessageBoxBase):
 
     def __init__(self, name_map, selected_names, avatars=None, parent=None):
         super().__init__(parent)
+        self.avatars = avatars
         self.setWindowTitle("编辑本命英雄")
 
         self.titleLabel = SubtitleLabel("编辑本命英雄", self)
@@ -110,15 +111,30 @@ class ChampionPickerDialog(MessageBoxBase):
 
         self.list_widget = ListWidget(self)
         selected = set(selected_names)
-        name_to_id = {name: champion_id for champion_id, name in name_map.items()}
+        self._name_to_id = {name: champion_id for champion_id, name in name_map.items()}
+        self._resolved_ids = set()
         for name in sorted(name_map.values()):
             item = QListWidgetItem(name)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(
                 Qt.CheckState.Checked if name in selected else Qt.CheckState.Unchecked
             )
-            item.setIcon(champion_icon(name_to_id.get(name), avatars))
+            champion_id = self._name_to_id.get(name)
+            icon = avatars.load_icon(champion_id) if avatars else None
+            if icon is not None:
+                item.setIcon(icon)
+                self._resolved_ids.add(champion_id)
+            else:
+                item.setIcon(champion_icon(champion_id, None))
             self.list_widget.addItem(item)
+
+        # Poll the avatar cache so icons downloaded after the dialog
+        # opened appear without reopening.
+        self._icon_timer = None
+        if avatars is not None and self._resolved_ids != set(name_map):
+            self._icon_timer = QTimer(self)
+            self._icon_timer.timeout.connect(self._refresh_icons)
+            self._icon_timer.start(800)
 
         self.viewLayout.addWidget(self.titleLabel)
         self.viewLayout.addWidget(self.search_box)
@@ -128,6 +144,25 @@ class ChampionPickerDialog(MessageBoxBase):
         self.cancelButton.setText("取消")
         self.widget.setFixedWidth(400)
         self.widget.setMinimumHeight(520)
+
+    def _refresh_icons(self):
+        """Swap placeholders for avatars downloaded after the dialog opened."""
+        if not self.avatars:
+            return
+        for index in range(self.list_widget.count()):
+            item = self.list_widget.item(index)
+            champion_id = self._name_to_id.get(item.text())
+            if champion_id is None or champion_id in self._resolved_ids:
+                continue
+            icon = self.avatars.load_icon(champion_id)
+            if icon is not None:
+                item.setIcon(icon)
+                self._resolved_ids.add(champion_id)
+        if (
+            self._icon_timer is not None
+            and self._resolved_ids >= set(self._name_to_id.values())
+        ):
+            self._icon_timer.stop()
 
     def _filter(self, text):
         # Hide items that do not contain the search text.

@@ -147,6 +147,11 @@ class ChampionNameMapper:
             self._save_cache()
             return True
         if self._load_cache():
+            if not self.alias_map:
+                # Legacy cache without aliases: upgrade via Data Dragon so
+                # avatar downloads can work, then persist the new format.
+                if self._fetch_datadragon():
+                    self._save_cache()
             return True
         if self._fetch_datadragon():
             self._save_cache()
