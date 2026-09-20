@@ -93,10 +93,11 @@ class StatusCard(CardWidget):
 
 
 class ChampionPickerDialog(MessageBoxBase):
-    """Fluent-styled dialog for picking preferred champions.
+    """Two-pane fluent dialog: pick champions on the left, order on the right.
 
     MessageBoxBase applies the theme-aware DIALOG style sheet, which a bare
     QDialog does not get — without it, dark-theme text renders unreadable.
+    Priority for auto swap is the right pane order, top = highest.
     """
 
     def __init__(self, name_map, selected_names, avatars=None, parent=None):
@@ -110,11 +111,12 @@ class ChampionPickerDialog(MessageBoxBase):
         self.search_box.setPlaceholderText("搜索英雄")
         self.search_box.textChanged.connect(self._filter)
 
+        # Left pane: all champions, checkable.
         self.list_widget = ListWidget(self)
         self.list_widget.setIconSize(QSize(32, 32))
-        selected = set(selected_names)
         self._name_to_id = {name: champion_id for champion_id, name in name_map.items()}
         self._resolved_ids = set()
+        selected = set(selected_names)
         for name in sorted(name_map.values()):
             item = QListWidgetItem(name)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -130,6 +132,49 @@ class ChampionPickerDialog(MessageBoxBase):
                 item.setIcon(champion_icon(champion_id, None))
             self.list_widget.addItem(item)
 
+        # Right pane: the priority order, top = grabbed first.
+        self.selected_widget = ListWidget(self)
+        self.selected_widget.setIconSize(QSize(32, 32))
+        for name in selected_names:
+            if name in self._name_to_id:
+                self.selected_widget.addItem(self._make_selected_item(name))
+
+        self.move_up_button = PushButton(FluentIcon.UP, "上移", self)
+        self.move_down_button = PushButton(FluentIcon.DOWN, "下移", self)
+        self.remove_button = PushButton(FluentIcon.DELETE, "移除", self)
+        self.move_up_button.clicked.connect(self._move_up)
+        self.move_down_button.clicked.connect(self._move_down)
+        self.remove_button.clicked.connect(self._remove_selected)
+        # Connect after initial population so programmatic check states
+        # do not trigger sync handlers.
+        self.list_widget.itemChanged.connect(self._on_left_item_changed)
+
+        left_column = QVBoxLayout()
+        left_column.addWidget(BodyLabel("全部英雄（勾选加入）", self))
+        left_column.addWidget(self.list_widget, 1)
+
+        button_row = QHBoxLayout()
+        button_row.addWidget(self.move_up_button)
+        button_row.addWidget(self.move_down_button)
+        button_row.addWidget(self.remove_button)
+        right_column = QVBoxLayout()
+        right_column.addWidget(BodyLabel("本命顺序（从上到下）", self))
+        right_column.addWidget(self.selected_widget, 1)
+        right_column.addLayout(button_row)
+
+        panes = QHBoxLayout()
+        panes.addLayout(left_column, 1)
+        panes.addLayout(right_column, 1)
+
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.addWidget(self.search_box)
+        self.viewLayout.addLayout(panes, 1)
+
+        self.yesButton.setText("确定")
+        self.cancelButton.setText("取消")
+        self.widget.setFixedWidth(600)
+        self.widget.setMinimumHeight(560)
+
         # Poll the avatar cache so icons downloaded after the dialog
         # opened appear without reopening.
         self._icon_timer = None
@@ -138,14 +183,59 @@ class ChampionPickerDialog(MessageBoxBase):
             self._icon_timer.timeout.connect(self._refresh_icons)
             self._icon_timer.start(300)
 
-        self.viewLayout.addWidget(self.titleLabel)
-        self.viewLayout.addWidget(self.search_box)
-        self.viewLayout.addWidget(self.list_widget, 1)
+    def _make_selected_item(self, name):
+        item = QListWidgetItem(name)
+        champion_id = self._name_to_id.get(name)
+        icon = self.avatars.load_icon(champion_id) if self.avatars else None
+        if icon is None:
+            icon = champion_icon(champion_id, None)
+        item.setIcon(icon)
+        return item
 
-        self.yesButton.setText("确定")
-        self.cancelButton.setText("取消")
-        self.widget.setFixedWidth(400)
-        self.widget.setMinimumHeight(520)
+    def _selected_row_of(self, name):
+        for row in range(self.selected_widget.count()):
+            if self.selected_widget.item(row).text() == name:
+                return row
+        return -1
+
+    def _on_left_item_changed(self, item):
+        # Keep the right pane in sync with left checkboxes.
+        name = item.text()
+        if item.checkState() == Qt.CheckState.Checked:
+            if self._selected_row_of(name) < 0:
+                self.selected_widget.addItem(self._make_selected_item(name))
+        else:
+            row = self._selected_row_of(name)
+            if row >= 0:
+                self.selected_widget.takeItem(row)
+
+    def _move_up(self):
+        row = self.selected_widget.currentRow()
+        if row <= 0:
+            return
+        item = self.selected_widget.takeItem(row)
+        self.selected_widget.insertItem(row - 1, item)
+        self.selected_widget.setCurrentRow(row - 1)
+
+    def _move_down(self):
+        row = self.selected_widget.currentRow()
+        if row < 0 or row >= self.selected_widget.count() - 1:
+            return
+        item = self.selected_widget.takeItem(row)
+        self.selected_widget.insertItem(row + 1, item)
+        self.selected_widget.setCurrentRow(row + 1)
+
+    def _remove_selected(self):
+        row = self.selected_widget.currentRow()
+        if row < 0:
+            return
+        name = self.selected_widget.item(row).text()
+        # Unchecking the left item triggers sync removal on the right.
+        for index in range(self.list_widget.count()):
+            left_item = self.list_widget.item(index)
+            if left_item.text() == name:
+                left_item.setCheckState(Qt.CheckState.Unchecked)
+                break
 
     def _refresh_icons(self):
         """Swap placeholders for avatars downloaded after the dialog opened."""
@@ -173,11 +263,10 @@ class ChampionPickerDialog(MessageBoxBase):
             item.setHidden(text not in item.text())
 
     def selected_names(self):
-        """Return checked names in list order (higher up = higher priority)."""
+        """Return preferred names in priority order (top = highest)."""
         return [
-            self.list_widget.item(index).text()
-            for index in range(self.list_widget.count())
-            if self.list_widget.item(index).checkState() == Qt.CheckState.Checked
+            self.selected_widget.item(index).text()
+            for index in range(self.selected_widget.count())
         ]
 
 
