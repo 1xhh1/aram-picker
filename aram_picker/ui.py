@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel, CardWidget, FluentIcon, FluentWindow, InfoBar, ListWidget,
-    PushButton, PrimaryPushButton, SearchLineEdit, SubtitleLabel, SwitchButton,
+    MessageBoxBase, PushButton, SearchLineEdit, SubtitleLabel, SwitchButton,
     TextEdit, TitleLabel, setTheme, Theme,
 )
 
@@ -81,17 +81,18 @@ class StatusCard(CardWidget):
         layout.addLayout(bottom_row)
 
 
-class ChampionPickerDialog(QDialog):
-    """Dialog for picking preferred champions with search and checkboxes."""
+class ChampionPickerDialog(MessageBoxBase):
+    """Fluent-styled dialog for picking preferred champions.
+
+    MessageBoxBase applies the theme-aware DIALOG style sheet, which a bare
+    QDialog does not get — without it, dark-theme text renders unreadable.
+    """
 
     def __init__(self, name_map, selected_names, parent=None):
         super().__init__(parent)
         self.setWindowTitle("编辑本命英雄")
-        self.resize(360, 480)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(10)
+        self.titleLabel = SubtitleLabel("编辑本命英雄", self)
 
         self.search_box = SearchLineEdit(self)
         self.search_box.setPlaceholderText("搜索英雄")
@@ -107,19 +108,14 @@ class ChampionPickerDialog(QDialog):
             )
             self.list_widget.addItem(item)
 
-        button_row = QHBoxLayout()
-        self.cancel_button = PushButton("取消", self)
-        self.ok_button = PrimaryPushButton(FluentIcon.ACCEPT, "确定", self)
-        button_row.addWidget(self.cancel_button)
-        button_row.addStretch(1)
-        button_row.addWidget(self.ok_button)
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.addWidget(self.search_box)
+        self.viewLayout.addWidget(self.list_widget, 1)
 
-        layout.addWidget(self.search_box)
-        layout.addWidget(self.list_widget, 1)
-        layout.addLayout(button_row)
-
-        self.cancel_button.clicked.connect(self.reject)
-        self.ok_button.clicked.connect(self.accept)
+        self.yesButton.setText("确定")
+        self.cancelButton.setText("取消")
+        self.widget.setFixedWidth(400)
+        self.widget.setMinimumHeight(520)
 
     def _filter(self, text):
         # Hide items that do not contain the search text.

@@ -3,7 +3,6 @@
 import json
 
 import pytest
-from PyQt6.QtWidgets import QApplication
 
 from aram_picker.lcu import ChampionNameMapper
 from aram_picker.monitor import ChampSelectMonitor
@@ -22,11 +21,6 @@ class DisconnectedLcu:
 
     def reset(self):
         pass
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    return QApplication.instance() or QApplication([])
 
 
 def make_window(mapper):
