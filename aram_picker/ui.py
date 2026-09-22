@@ -564,9 +564,9 @@ def build_changelog_entries(layout, entries, parent_widget, labels_out=None):
         header = f"v{entry['version']}（{entry['date']}）"
         is_current = entry["version"] == __version__
         version_label = SubtitleLabel(header, parent_widget)
+        version_label.setStyleSheet("color: #D32F2F;")
         if is_current:
             version_label.setText(f"{header}  ← 当前版本")
-            version_label.setStyleSheet("color: #4ECDC4;")
             current_label = version_label
         layout.addWidget(version_label)
         if labels_out is not None:
@@ -574,6 +574,7 @@ def build_changelog_entries(layout, entries, parent_widget, labels_out=None):
         for item in entry["items"]:
             item_label = BodyLabel(f"· {item}", parent_widget)
             item_label.setWordWrap(True)
+            item_label.setStyleSheet("color: #D32F2F;")
             layout.addWidget(item_label)
             if labels_out is not None:
                 labels_out.append(item_label)
