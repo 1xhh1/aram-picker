@@ -9,8 +9,8 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QObject, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon
 from PyQt6.QtWidgets import (
-    QApplication, QDialog, QHBoxLayout, QListWidgetItem, QSystemTrayIcon,
-    QVBoxLayout, QWidget,
+    QApplication, QDialog, QHBoxLayout, QListWidgetItem, QScrollArea,
+    QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     Action, BodyLabel, CardWidget, FluentIcon, FluentWindow, InfoBar,
@@ -19,6 +19,7 @@ from qfluentwidgets import (
 )
 
 from .avatars import AvatarCache
+from .changelog import CHANGELOG, entries_since
 from .config import AppConfig
 from ._version import __version__
 from .lcu import ChampionNameMapper, LCUConnector
@@ -556,6 +557,91 @@ class LogPage(QWidget):
         self.log_edit.clear()
 
 
+def build_changelog_entries(layout, entries, parent_widget, labels_out=None):
+    """Append version entry labels to a layout; return the current-version label."""
+    current_label = None
+    for entry in entries:
+        header = f"v{entry['version']}（{entry['date']}）"
+        is_current = entry["version"] == __version__
+        version_label = SubtitleLabel(header, parent_widget)
+        if is_current:
+            version_label.setText(f"{header}  ← 当前版本")
+            version_label.setStyleSheet("color: #4ECDC4;")
+            current_label = version_label
+        layout.addWidget(version_label)
+        if labels_out is not None:
+            labels_out.append(version_label)
+        for item in entry["items"]:
+            item_label = BodyLabel(f"· {item}", parent_widget)
+            item_label.setWordWrap(True)
+            layout.addWidget(item_label)
+            if labels_out is not None:
+                labels_out.append(item_label)
+    return current_label
+
+
+class ChangelogPage(QWidget):
+    """Navigation page showing the full version history."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("changelogPage")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(36, 24, 36, 24)
+        layout.setSpacing(12)
+
+        title = TitleLabel("更新日志", self)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(4, 4, 4, 4)
+        content_layout.setSpacing(6)
+        self._labels = []
+        self._current_label = build_changelog_entries(
+            content_layout, CHANGELOG, content, labels_out=self._labels
+        )
+        content_layout.addStretch(1)
+        scroll.setWidget(content)
+
+        layout.addWidget(title)
+        layout.addWidget(scroll, 1)
+
+    def _collect_texts(self):
+        return self._labels
+
+
+class ChangelogDialog(MessageBoxBase):
+    """Dialog listing what changed since the last seen version."""
+
+    def __init__(self, entries, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("更新内容")
+        self.titleLabel = SubtitleLabel("本次更新", self)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(4, 4, 4, 4)
+        content_layout.setSpacing(6)
+        build_changelog_entries(content_layout, entries, content)
+        content_layout.addStretch(1)
+        scroll.setWidget(content)
+
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.addWidget(scroll, 1)
+
+        self.yesButton.setText("知道了")
+        self.hideCancelButton()
+        self.widget.setFixedWidth(480)
+        self.widget.setMinimumHeight(420)
+
+
 class MainWindow(FluentWindow):
     """Fluent navigation window hosting the champ select and log pages."""
 
@@ -570,6 +656,7 @@ class MainWindow(FluentWindow):
 
         self.champ_page = ChampSelectPage(monitor, avatars=self.avatars, parent=self)
         self.log_page = LogPage(self)
+        self.changelog_page = ChangelogPage(self)
 
         self._init_window()
         self._init_navigation()
@@ -583,6 +670,18 @@ class MainWindow(FluentWindow):
         icon_path = Path(__file__).parent / "assets" / "app.ico"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
+
+    def _maybe_show_changelog(self):
+        """Pop the what's-new dialog once per version upgrade."""
+        current = __version__
+        if self.config.last_seen_version == current:
+            return False
+        entries = entries_since(self.config.last_seen_version)
+        if entries:
+            ChangelogDialog(entries, self).exec()
+        self.config.last_seen_version = current
+        self.config.save()
+        return True
 
     def _init_tray(self):
         """System tray icon; closing the window hides to the tray."""
@@ -628,6 +727,9 @@ class MainWindow(FluentWindow):
         )
         self.addSubInterface(
             self.log_page, FluentIcon.DOCUMENT, "日志"
+        )
+        self.addSubInterface(
+            self.changelog_page, FluentIcon.HISTORY, "更新日志"
         )
 
     def _init_preferences(self):
@@ -836,6 +938,9 @@ def run():
     if not confirm_disclaimer(window):
         window.close()
         return
+
+    # Show what changed once per version upgrade.
+    window._maybe_show_changelog()
 
     # Warm up names and avatars in the background (no client needed).
     threading.Thread(target=window._background_init, daemon=True).start()
