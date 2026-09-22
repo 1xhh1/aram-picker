@@ -319,3 +319,52 @@ def test_auto_swap_noop_without_bench():
 
     time.sleep(0.2)
     assert lcu.posts == []
+
+
+def test_manual_double_click_debounced():
+    # Regression: double-click fires itemClicked twice; the second click
+    # lands after the bench refreshed and used to swap back to the old
+    # champion. Manual requests within the debounce window are ignored.
+    lcu = FakeLcu()
+    clock = FakeClock()
+    monitor = make_monitor(lcu, clock)
+
+    enter_champ_select(monitor, lcu, make_session([TEEMO_ID, YASUO_ID]))
+    # Cooldown active so requests register as pending instead of firing.
+    with monitor._lock:
+        monitor.last_swap_time = clock.now
+
+    assert monitor.request_swap(0) is True  # first click: teemo
+    assert monitor.request_swap(1) is False  # second click: ignored
+    with monitor._lock:
+        assert monitor.pending_target["id"] == TEEMO_ID
+
+    # After the debounce window a manual re-target works again.
+    clock.now += monitor.MANUAL_SWAP_DEBOUNCE + 0.1
+    assert monitor.request_swap(1) is True
+    with monitor._lock:
+        assert monitor.pending_target["id"] == YASUO_ID
+
+
+def test_auto_swap_path_not_debounced():
+    lcu = FakeLcu()
+    clock = FakeClock()
+    monitor = make_monitor(lcu, clock)
+    monitor.set_auto_swap(True)
+    monitor.set_preferences(["亚索", "劫"])
+
+    # Cooldown active: first auto swap registers as pending.
+    with monitor._lock:
+        monitor.last_swap_time = clock.now
+
+    lcu.session_response = make_session([YASUO_ID, ZED_ID])
+    monitor._poll_once()
+    with monitor._lock:
+        assert monitor.pending_target["id"] == YASUO_ID
+        monitor.pending_target = None
+        monitor.state = monitor.STATE_READY
+
+    # A second auto check right away must still act (no manual debounce).
+    monitor._auto_swap_check()
+    with monitor._lock:
+        assert monitor.pending_target is not None

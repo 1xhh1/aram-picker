@@ -14,6 +14,10 @@ class ChampSelectMonitor:
     SWAP_MAX_WAIT = 8.0
     SWAPPED_DISPLAY_DURATION = 1.0
     FAIL_THRESHOLD = 5
+    # Double-click fires itemClicked twice; the second click lands after
+    # the bench refreshed (target gone, old champion added) and would
+    # swap back. Manual requests inside this window are ignored.
+    MANUAL_SWAP_DEBOUNCE = 0.5
 
     def __init__(
         self,
@@ -54,6 +58,7 @@ class ChampSelectMonitor:
         self.auto_swap_enabled = False
         self._preference_names = []
         self._auto_swap_disabled = False
+        self._last_manual_at = None
 
         self.on_enter = None
         self.on_leave = None
@@ -120,6 +125,16 @@ class ChampSelectMonitor:
             if not 0 <= index < len(self.available_champions):
                 return False
             if manual:
+                # Debounce double-clicks: ignore the second click of a
+                # double-click so a completed swap is not instantly
+                # reverted to the old champion.
+                now = self._clock()
+                if (
+                    self._last_manual_at is not None
+                    and now - self._last_manual_at < self.MANUAL_SWAP_DEBOUNCE
+                ):
+                    return False
+                self._last_manual_at = now
                 # The player made an explicit choice; stop overriding it.
                 self._auto_swap_disabled = True
 
@@ -289,6 +304,7 @@ class ChampSelectMonitor:
             self._swap_epoch += 1
             self._swap_http_succeeded = False
             self._auto_swap_disabled = False
+            self._last_manual_at = None
             self._set_state(self.STATE_READY)
         self._log("进入选人阶段")
         if self.on_enter:
