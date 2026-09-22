@@ -93,6 +93,7 @@ class MonitorBridge(QObject):
     logged = pyqtSignal(str)
     updated = pyqtSignal()
     connectionChanged = pyqtSignal(bool)
+    notified = pyqtSignal(str, str)
 
 
 class StatusCard(CardWidget):
@@ -730,6 +731,7 @@ class MainWindow(FluentWindow):
         self.monitor.on_log = self._bridge.logged.emit
         self.monitor.on_update = self._bridge.updated.emit
         self.monitor.on_connection_change = self._bridge.connectionChanged.emit
+        self.monitor.on_notify = self._bridge.notified.emit
 
         self._bridge.entered.connect(self._show_champ_select)
         self._bridge.left.connect(self._leave_champ_select)
@@ -737,10 +739,32 @@ class MainWindow(FluentWindow):
         self._bridge.logged.connect(self.log_page.append)
         self._bridge.updated.connect(self.champ_page.refresh)
         self._bridge.connectionChanged.connect(self._update_connection_status)
+        self._bridge.notified.connect(self._on_notify)
 
         self.champ_page.auto_accept_switch.checkedChanged.connect(
             self._toggle_auto_accept
         )
+
+    def _on_notify(self, level, message):
+        """Show swap results where the user can see them.
+
+        InfoBar when the window is visible; a system tray notification
+        when it is hidden in the tray.
+        """
+        if self.isVisible() and not self.isMinimized():
+            if level == "success":
+                InfoBar.success(
+                    title="换人助手", content=message, parent=self, duration=2500
+                )
+            else:
+                InfoBar.warning(
+                    title="换人助手", content=message, parent=self, duration=2500
+                )
+        else:
+            icon = QSystemTrayIcon.MessageIcon.Information
+            if level != "success":
+                icon = QSystemTrayIcon.MessageIcon.Warning
+            self.tray_icon.showMessage(APP_TITLE, message, icon, 3000)
 
     def _toggle_auto_accept(self, enabled):
         self.monitor.set_auto_accept(enabled)

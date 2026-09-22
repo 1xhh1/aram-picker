@@ -66,6 +66,7 @@ class ChampSelectMonitor:
         self.on_log = None
         self.on_update = None
         self.on_connection_change = None
+        self.on_notify = None
 
     def get_state_snapshot(self):
         with self._lock:
@@ -371,6 +372,7 @@ class ChampSelectMonitor:
                     self._swapped_at = now
                     self._set_state(self.STATE_SWAPPED)
                     self._log(f"已交换: {target_name}")
+                    self._notify("success", f"已交换: {target_name}")
                     return
 
                 still_on_bench = any(
@@ -384,9 +386,11 @@ class ChampSelectMonitor:
                             else:
                                 self._cancel_failed_swap_locked()
                                 self._log(f"交换验证超时: {target_name}，已取消")
+                                self._notify("warning", f"交换验证超时: {target_name}")
                         return
                     self._cancel_failed_swap_locked()
                     self._log(f"{target_name} 被队友换走，交换失败")
+                    self._notify("warning", f"{target_name} 被队友换走")
                     return
 
                 if now >= self._swap_verify_deadline:
@@ -411,6 +415,7 @@ class ChampSelectMonitor:
                     name = self.pending_target["name"]
                     self._cancel_failed_swap_locked()
                     self._log(f"{name} 被队友换走，已取消等待")
+                    self._notify("warning", f"{name} 被队友换走")
                 elif self._is_cooldown_over() and now >= self._retry_after:
                     job = self._prepare_swap_locked()
 
@@ -475,6 +480,11 @@ class ChampSelectMonitor:
     def _log(self, message):
         if self.on_log:
             self.on_log(message)
+
+    def _notify(self, level, message):
+        """Push a user-facing result notification (success/warning)."""
+        if self.on_notify:
+            self.on_notify(level, message)
 
     def _is_cooldown_over(self):
         return not self.last_swap_time or (
